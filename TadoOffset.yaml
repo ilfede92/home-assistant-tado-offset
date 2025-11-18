@@ -1,47 +1,53 @@
+# Blueprint migliorato per TadoOffset - versione integrata
+# - Mantiene la logica richiesta (arrotondamento 0.1°C; nessun smoothing)
+# - Aggiunge persistence, battery_saver/back_off, hysteresis opzionale, controllo impatto su hvac
+# - Wait fino a 120s; aggiorna sempre input_datetime ultimo cambio (scelta ii)
+# Tutti i commenti sono in italiano per facilitare l'uso e le modifiche.
 blueprint:
-  name: TadoOffset
+  name: TadoOffset — avanzato
   description: >
-    Cambia il valore di offset tramite un sensore esterno.
-    Calcola l'offset tenendo conto dell'offset corrente della valvola e applica la modifica solo se:
-      - la differenza tra sensore esterno e sensore Tado supera la tolleranza della modalità
-      - è passato almeno il tempo minimo dall'ultimo cambio (input_datetime passato)
-      - il nuovo offset (arrotondato a 0.1°C) è diverso dall'offset corrente (arrotondato)
-      - l'applicazione dell'offset potrebbe influire sul comportamento della valvola (es. cambiare lo stato on/off)
-    Nota: l'offset ha precisione 0.1°C (arrotondamento).
+    Blueprint per impostare l'offset delle valvole Tado in base a un sensore esterno.
+    Regole principali:
+      - calcolo offset tenendo conto dell'offset corrente della valvola (O_new = O_curr + (External - Tado_disp))
+      - arrotondamento a 0.1°C (precisione 0.1)
+      - cambia offset solo se: diff > tolleranza per modalità, è passato il min_time dall'ultimo cambio,
+        offset arrotondato differente da quello attuale, e l'applicazione potrebbe cambiare la richiesta di calore
+      - opzione battery_saver con back_off_secs per ridurre i cambi frequenti (batterie)
+      - persistence configurabile per i trigger (minuti)
   domain: automation
 
   input:
     ValvolaRiferimento:
       name: Valvola Tado di riferimento
-      description: Entità climate della testa Tado
+      description: Entità climate della testa Tado (ogni valvola dovrebbe avere il proprio input_datetime)
       selector:
         entity:
           domain: climate
     TadoTemperature:
       name: Sensore di temperatura Tado
-      description: Sensore che riporta la temperatura rilevata dalla testa
+      description: Sensore che riporta la temperatura rilevata dalla testa (incluso l'effetto offset)
       selector:
         entity:
           domain: sensor
     ExternalTemperaure:
-      name: Sensore di temperartura Esterno
+      name: Sensore di temperatura Esterno
       description: Sensore di temperatura esterno usato come riferimento
       selector:
         entity:
           domain: sensor
     UltimoCambioOffset:
-      name: date input che tiene in memoria l'ultimo cambio offset
-      description: input_datetime usato per tenere traccia dell'ultimo cambio per questa valvola
+      name: input_datetime che tiene in memoria l'ultimo cambio offset
+      description: input_datetime usato per tracciare l'ultimo cambio per questa valvola (uno per valvola consigliato)
       selector:
         entity:
           domain: input_datetime
     Contatore:
-      name: Contatore che incrementa ad ogni cambio offset.
+      name: Contatore che incrementa ad ogni tentativo/applicazione offset
       selector:
         entity:
           domain: counter
     TolleranzaHomeHeating:
-      name: Valore tolleranza temperatura in Home - Heating
+      name: Tolleranza Home - Heating (°C)
       default: 0.2
       selector:
         number:
@@ -50,7 +56,7 @@ blueprint:
           step: 0.1
           unit_of_measurement: "°C"
     TolleranzaHomeOffIdle:
-      name: Valore tolleranza temperatura in Home - Off / Idle
+      name: Tolleranza Home - Off/Idle (°C)
       default: 0.4
       selector:
         number:
@@ -59,12 +65,12 @@ blueprint:
           step: 0.1
           unit_of_measurement: "°C"
     TolleranzaAway:
-      name: Valore tolleranza temperatura in Away
+      name: Tolleranza Away (°C)
       default: 0.5
       selector:
         number:
           min: 0
-          max: 2
+          max: 5
           step: 0.1
           unit_of_measurement: "°C"
     MinTimeHomeHeating:
@@ -94,11 +100,54 @@ blueprint:
           min: 0
           max: 60000
           unit_of_measurement: secondi
-    # epsilon interno non necessario perché usiamo arrotondamento a 0.1°C come scelto;
-    # manteniamo comunque un valore di sicurezza per il wait_template
+    PersistenceMinutesTarget:
+      name: Persistence time Tado (minuti)
+      description: Tempo in minuti che lo stato/attributo della valvola deve persistere prima di triggerare
+      default: 0.17   # ~10s (valore minimo ragionevole)
+      selector:
+        number:
+          min: 0.17
+          max: 60
+          step: 0.17
+          unit_of_measurement: minuti
+    PersistenceMinutesSource:
+      name: Persistence time sensore esterno (minuti)
+      description: Tempo in minuti che il sensore esterno deve persistere prima di triggerare
+      default: 0.17
+      selector:
+        number:
+          min: 0.17
+          max: 60
+          step: 0.17
+          unit_of_measurement: minuti
+    battery_saver:
+      name: Battery saver
+      description: Se true evita cambi frequenti usando back_off_secs e controllo impatto su hvac_action
+      default: true
+      selector:
+        boolean: {}
+    back_off_secs:
+      name: Back-off (secondi) in modalità battery_saver
+      description: Periodo minimo da rispettare dal valore di offset_last_changed prima di consentire nuovo cambiamento
+      default: 900
+      selector:
+        number:
+          min: 0
+          max: 86400
+          unit_of_measurement: secondi
+    hysteresis_threshold:
+      name: Hysteresis threshold (°C)
+      description: Differenza minima tra offset calcolato e offset corrente per applicare (opzionale)
+      default: 0.1
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.01
+          unit_of_measurement: "°C"
     wait_epsilon:
-      name: Soglia per considerare l'offset applicato (°C)
-      description: Usata dal wait_template per verificare che l'attributo raggiunga il valore richiesto (piccola soglia)
+      name: Soglia wait (°C)
+      description: soglia piccola usata dal wait_template per considerare l'offset applicato dal device
       default: 0.05
       selector:
         number:
@@ -107,161 +156,153 @@ blueprint:
           step: 0.01
           unit_of_measurement: "°C"
 
-# TRIGGER: manteniamo tutti e tre i trigger come richiesto dall'utente.
-# Aggiungiamo un breve debounce (for 10s) per evitare ri-entrate durante aggiornamenti rapidi.
+# TRIGGER: manteniamo tutti e tre i trigger con persistence configurabile (in minuti)
 trigger:
   - platform: state
     entity_id: !input ValvolaRiferimento
-    for: "00:00:10"
+    for:
+      minutes: !input PersistenceMinutesTarget
   - platform: state
     entity_id: !input TadoTemperature
-    for: "00:00:10"
+    for:
+      minutes: !input PersistenceMinutesTarget
   - platform: state
     entity_id: !input ExternalTemperaure
-    for: "00:00:10"
+    for:
+      minutes: !input PersistenceMinutesSource
 
 condition: []
 
 action:
   - variables:
-      # INPUTS
+      # INPUT ENTITIES
       TadoValve: !input ValvolaRiferimento
       TadoTemperatureSensor: !input TadoTemperature
       ExternalSenors: !input ExternalTemperaure
-      last_offset_change_variables: !input UltimoCambioOffset
+      last_offset_change_entity: !input UltimoCambioOffset
       Counter: !input Contatore
-      tollerance_home_heating: !input TolleranzaHomeHeating
-      tollerance_home_offidle: !input TolleranzaHomeOffIdle
-      tollerance_away: !input TolleranzaAway
-      min_time_between_adjust_home_heating: !input MinTimeHomeHeating
-      min_time_between_adjust_home_offidle: !input MinTimeHomeOffIdle
-      min_time_between_adjust_away: !input MinTimeAway
+
+      # CONFIG
+      tol_home_heating: !input TolleranzaHomeHeating
+      tol_home_offidle: !input TolleranzaHomeOffIdle
+      tol_away: !input TolleranzaAway
+      min_time_home_heating: !input MinTimeHomeHeating
+      min_time_home_offidle: !input MinTimeHomeOffIdle
+      min_time_away: !input MinTimeAway
+      persistence_target_min: !input PersistenceMinutesTarget
+      persistence_source_min: !input PersistenceMinutesSource
+      battery_saver_mode: !input battery_saver
+      back_off_seconds: !input back_off_secs
+      hysteresis: !input hysteresis_threshold
       wait_eps: !input wait_epsilon
 
-      # STATO CORRENTE: leggiamo gli attributi e gli stati utili
-      # last_offset_change è la stringa dell'entity input_datetime (es. "2025-11-18 20:36:15")
-      last_offset_change: "{{ states(last_offset_change_variables) }}"
-      # offset corrente come float (potrebbe essere negativo)
+      # STATO CORRENTE (raw e arrotondato)
       last_offset_raw: "{{ state_attr(TadoValve, 'offset_celsius') | default(0.0) | float }}"
-      # arrotondato a 1 decimale per confronti (scelta A)
       last_offset: "{{ (state_attr(TadoValve, 'offset_celsius') | default(0.0) | float) | round(1) }}"
-      # temperatura mostrata dal sensore Tado (incluso effetto offset)
       tado_disp_raw: "{{ states(TadoTemperatureSensor) | float(0) }}"
       tado_disp: "{{ (states(TadoTemperatureSensor) | float(0)) | round(1) }}"
-      # valore del sensore esterno
       external_val_raw: "{{ states(ExternalSenors) | float(0) }}"
       external_val: "{{ (states(ExternalSenors) | float(0)) | round(1) }}"
-      # temperatura target impostata sulla valvola
       target_temperature: "{{ state_attr(TadoValve, 'temperature') | float(0) }}"
-      # hvac_action e preset_mode correnti
-      current_hvac_action: "{{ state_attr(TadoValve, 'hvac_action') | string }}"
-      current_preset_mode: "{{ state_attr(TadoValve, 'preset_mode') | string }}"
+      hvac_action: "{{ state_attr(TadoValve, 'hvac_action') | string }}"
+      preset_mode: "{{ state_attr(TadoValve, 'preset_mode') | string }}"
 
-      # ricavo la modalità semplificata (HHe = home heating, HOI = home off/idle, A = away)
+      # modalita' semplificata
       mode: >-
-        {% if (current_preset_mode == 'home') and (current_hvac_action == 'heating') %}
+        {% if (preset_mode == 'home') and (hvac_action == 'heating') %}
           HHe
-        {% elif (current_preset_mode == 'home') and (current_hvac_action != 'heating') %}
+        {% elif (preset_mode == 'home') and (hvac_action != 'heating') %}
           HOI
-        {% elif (current_preset_mode == 'away') %}
+        {% elif (preset_mode == 'away') %}
           A
         {% else %}
           ND
         {% endif %}
 
-      # tolleranza in funzione della modalità (valori configurabili via input)
-      tollerance: >-
-        {% if (current_preset_mode == 'home') and (current_hvac_action == 'heating') %}
-          {{ tollerance_home_heating }}
-        {% elif (current_preset_mode == 'home') and (current_hvac_action != 'heating') %}
-          {{ tollerance_home_offidle }}
-        {% elif (current_preset_mode == 'away') %}
-          {{ tollerance_away }}
-        {% else %}
-          1.0
-        {% endif %}
+      # tolleranza e min_time in base alla modalità
+      tolerance: >-
+        {% if mode == 'HHe' %} {{ tol_home_heating }}
+        {% elif mode == 'HOI' %} {{ tol_home_offidle }}
+        {% elif mode == 'A' %} {{ tol_away }}
+        {% else %} 1.0 {% endif %}
 
-      # min_time in secondi in funzione della modalità
       min_time_between_adjust: >-
-        {% if (current_preset_mode == 'home') and (current_hvac_action == 'heating') %}
-          {{ min_time_between_adjust_home_heating }}
-        {% elif (current_preset_mode == 'home') and (current_hvac_action != 'heating') %}
-          {{ min_time_between_adjust_home_offidle }}
-        {% elif (current_preset_mode == 'away') %}
-          {{ min_time_between_adjust_away }}
-        {% else %}
-          1.0
-        {% endif %}
+        {% if mode == 'HHe' %} {{ min_time_home_heating }}
+        {% elif mode == 'HOI' %} {{ min_time_home_offidle }}
+        {% elif mode == 'A' %} {{ min_time_away }}
+        {% else %} 1 {% endif %}
 
-      # SECONDI dall'ultimo cambiamento: usiamo l'entity UltimoCambioOffset passato al blueprint
+      # SECONDI dall'ultimo cambiamento (usiamo l'input_datetime passato)
       SecLastadjust: >-
-        {{ ((as_timestamp(now()) - as_timestamp(states(last_offset_change_variables))) | int) }}
+        {{ ((as_timestamp(now()) - as_timestamp(states(last_offset_change_entity))) | int) }}
 
-      # CALCOLO DELL'OFFSET: teniamo conto dell'offset corrente secondo la tua logica:
-      # O_new = O_curr + (External - Tado_disp)
-      # Usiamo i valori raw per il calcolo e poi arrotondiamo a 1 decimale (precisione 0.1°C)
+      # CALCOLO dell'offset secondo la logica: O_new = O_curr + (External - Tado_disp)
       raw_offset_calc: >-
-        {{ (last_offset_raw + (external_val_raw - tado_disp_raw)) }}
-      # arrotondamento a 0.1°C come scelto (A)
-      offset: "{{ (raw_offset_calc | float) | round(1) }}"
-
-      # clamp (manteniamo i limiti che usavi)
+        {{ ( last_offset_raw + (external_val_raw - tado_disp_raw) ) }}
+      offset_rounded: "{{ (raw_offset_calc | float) | round(1) }}"
       offset_clamped: >-
-        {% set v = offset | float %}
+        {% set v = offset_rounded | float %}
         {% if v > 10.0 %} 10.0
         {% elif v < -9.9 %} -9.9
         {% else %} {{ v | round(1) }}
         {% endif %}
 
-      # nuova temperatura che la valvola vedrebbe dopo l'applicazione dell'offset:
-      # T_disp_new = T_disp - O_curr + O_new
+      # Nuova temperatura percepita dalla valvola dopo l'applicazione dell'offset:
       new_displayed_temp: >-
         {{ (tado_disp_raw - last_offset_raw + offset_clamped | float) | round(1) }}
 
-      # flag se l'applicazione dell'offset cambierebbe la relazione rispetto al target
-      # (utile per decidere se il cambiamento influenzerà on/off del riscaldamento)
+      # Verifica se il cambiamento impatta la richiesta di calore (utile per battery_saver)
       significant_state_change: >-
-        {% set curr_lt = (tado_disp_raw < target_temperature) %}
-        {% set new_lt = ((tado_disp_raw - last_offset_raw + offset_clamped | float) < target_temperature) %}
-        {{ curr_lt != new_lt }}
+        {% set curr_req = (tado_disp_raw < target_temperature) %}
+        {% set new_req = ((tado_disp_raw - last_offset_raw + offset_clamped | float) < target_temperature) %}
+        {{ curr_req != new_req }}
 
-      # confronto sugli offset arrotondati a 0.1 (scelta A): procediamo solo se diversi
+      # Confronto arrotondato degli offset (scelta A)
       offsets_differ: >-
         {{ ( (last_offset | float) != (offset_clamped | float) ) }}
 
-  # Log diagnostico sintetico (disattiva se troppo verboso)
-  - service: logbook.log
-    data:
-      name: "TadoOffset — debug"
-      message: >
-        valve={{ TadoValve }}; mode={{ mode }}; hvac={{ current_hvac_action }}; preset={{ current_preset_mode }};
-        tado={{ tado_disp }}; external={{ external_val }}; diff={{ (external_val_raw - tado_disp_raw) | round(2) }};
-        tol={{ tollerance }}; last_offset={{ last_offset }}; new_offset={{ offset_clamped }};
-        new_disp={{ new_displayed_temp }}; target={{ target_temperature }};
-        SecLastadjust={{ SecLastadjust }}; min_time={{ min_time_between_adjust }};
-        offsets_differ={{ offsets_differ }}; significant_state_change={{ significant_state_change }}
-      entity_id: "{{ TadoValve }}"
-    enabled: false
+      # differenza sensori
+      external_diff: "{{ (external_val_raw - tado_disp_raw) | round(2) }}"
 
-  # CONDIZIONI PRIMA DI ESEGUIRE LA CHIAMATA AL SERVIZIO TADO:
+  # LOG DI DEBUG SINTETICO (disattivare se troppo verboso)
+  - service: system_log.write
+    data:
+      message: >
+        [{{ now() }}] TadoOffset trigger: valve={{ TadoValve }} mode={{ mode }} hvac={{ hvac_action }};
+        tado={{ tado_disp }} ext={{ external_val }} diff={{ external_diff }};
+        tol={{ tolerance }} last_offset={{ last_offset }} new_offset={{ offset_clamped }};
+        new_disp={{ new_displayed_temp }} target={{ target_temperature }};
+        SecLastadjust={{ SecLastadjust }} min_time={{ min_time_between_adjust }};
+        offsets_differ={{ offsets_differ }} significant_state_change={{ significant_state_change }};
+        battery_saver={{ battery_saver_mode }} back_off={{ back_off_seconds }}
+      level: debug
+      logger: blueprints.tado.offset
+
+  # CONDIZIONI: controllo che tutto sia valido e che il cambiamento sia necessario
   - condition: and
     conditions:
-      # i sensori devono essere numerici
+      # sensori numerici
       - "{{ is_number(states(ExternalSenors)) }}"
       - "{{ is_number(states(TadoTemperatureSensor)) }}"
-      # Non siamo in modalità away (come richiesto in precedenza)
-      - "{{ state_attr(TadoValve, 'preset_mode') != 'away' }}"
-      # differenza esterno - tado deve superare la tolleranza (in funzione della modalità)
+      # non agire in away (come da richieste)
+      - "{{ preset_mode != 'away' }}"
+      # la differenza tra sensore esterno e tado deve superare la tolleranza per la modalità
       - >-
-        {{ ((external_val_raw - tado_disp_raw) | abs) > (tollerance | float) }}
-      # è passato almeno min_time dall'ultimo change
+        {{ (external_val_raw - tado_disp_raw) | abs > (tolerance | float) }}
+      # è passato almeno min_time dall'ultimo cambio
       - "{{ SecLastadjust > min_time_between_adjust }}"
-      # l'offset arrotondato a 0.1 deve essere diverso dall'attuale arrotondato a 0.1
+      # l'offset arrotondato deve essere differente (scelta A)
       - "{{ offsets_differ }}"
-      # l'applicazione deve avere potenziale impatto sul funzionamento della valvola
-      - "{{ significant_state_change }}"
+      # hysteresis: il cambiamento deve superare la soglia opzionale
+      - "{{ (offset_clamped | float - last_offset | float) | abs >= (hysteresis | float) }}"
+      # se battery_saver attivo, rispettiamo anche back_off_secs (in aggiunta al SecLastadjust)
+      - >-
+        {{ ((not battery_saver_mode) or (SecLastadjust > (back_off_seconds | int))) }}
+      # se battery_saver attivo, cambiamo solo se l'applicazione impatta la richiesta di calore
+      - >-
+        {{ ((not battery_saver_mode) or significant_state_change) }}
 
-  # SE TUTTE LE CONDIZIONI SONO VERE -> applichiamo l'offset
+  # ESEGUI IL SET DELL'OFFSET (solo se tutte le condizioni passano)
   - service: tado.set_climate_temperature_offset
     data:
       entity_id: "{{ TadoValve }}"
@@ -269,33 +310,32 @@ action:
     enabled: true
 
   # Aspettiamo fino a 120s che l'attributo offset_celsius si avvicini al valore richiesto
-  # Usiamo una soglia small (wait_eps) per tollerare arrotondamenti e ritardi.
   - wait_template: >-
       {{ ((state_attr(TadoValve, 'offset_celsius') | float(0) - offset_clamped | float(0)) | abs) < (wait_eps | float(0)) }}
     timeout: "00:02:00"
     continue_on_timeout: true
 
-  # Aggiorniamo sempre l'input_datetime ultimo cambio (SCELTA ii: aggiornare comunque)
-  # Questo evita retry immediati e preserva batteria; eventuale fallimento è loggato.
+  # AGGIORNIAMO SEMPRE l'input_datetime ultimo cambio (scelta ii: aggiorniamo comunque)
   - service: input_datetime.set_datetime
     target:
-      entity_id: "{{ last_offset_change_variables }}"
+      entity_id: "{{ last_offset_change_entity }}"
     data:
       date_time: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
-  # Log finale: indichiamo se il valore è stato effettivamente applicato o no
+  # Registro risultato in logbook per audit (utile)
   - service: logbook.log
     data:
       name: "TadoOffset — result"
       message: >
-        Valve={{ TadoValve }}; requested_offset={{ offset_clamped }}; applied_offset={{ state_attr(TadoValve, 'offset_celsius') | default('n/a') }};
-        achieved={{ ( (state_attr(TadoValve, 'offset_celsius') | float(0) - offset_clamped | float(0)) | abs ) < (wait_eps | float(0)) }};
+        Valve={{ TadoValve }}; requested_offset={{ offset_clamped }};
+        applied_offset={{ state_attr(TadoValve,'offset_celsius') | default('n/a') }};
+        achieved={{ ((state_attr(TadoValve,'offset_celsius') | float(0) - offset_clamped | float(0)) | abs) < (wait_eps | float(0)) }};
         new_displayed={{ new_displayed_temp }};
         SecLastadjust_before_update={{ SecLastadjust }}
       entity_id: "{{ TadoValve }}"
-    enabled: true
+      domain: climate
 
-  # Incrementiamo il contatore per tracciare quante volte abbiamo tentato/applicato (a tua scelta)
+  # Incrementiamo il contatore per tenere traccia dei tentativi/applicazioni
   - service: counter.increment
     target:
       entity_id: "{{ Counter }}"
