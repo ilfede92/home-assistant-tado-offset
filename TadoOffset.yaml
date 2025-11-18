@@ -102,54 +102,75 @@ trigger:
 condition: []
 action:
   - variables:
-      TadoValve: !input ValvolaRiferimento
-      TadoTemperatureSensor: !input TadoTemperature
-      ExternalSenors: !input ExternalTemperaure
-      last_offset_change_variables: !input UltimoCambioOffset
-      Counter: !input Contatore
-      tollerance_home_heating: !input TolleranzaHomeHeating
-      tollerance_home_offidle: !input TolleranzaHomeOffIdle
-      tollerance_away: !input TolleranzaAway
-      min_time_between_adjust_home_heating: !input MinTimeHomeHeating
-      min_time_between_adjust_home_offidle: !input MinTimeHomeOffIdle
-      min_time_between_adjust_away: !input MinTimeAway
-      last_offset_change: "{{ states(last_offset_change_variables) }}"
-      last_offset: "{{ float(state_attr(TadoValve, 'offset_celsius')) }}"
-      mode: >-
-        {% if (state_attr(TadoValve, 'preset_mode') == "home") and
-        (state_attr(TadoValve, 'hvac_action') == "heating")  %} HHe {% elif
-        (state_attr(TadoValve, 'preset_mode') == "home") and
-        (state_attr(TadoValve, 'hvac_action') != "heating")  %} HOI {% elif
-        (state_attr(TadoValve, 'preset_mode') == "away") %} A    {% else %} ND
-        {% endif %}  
-      tollerance: >-
-        {% if (state_attr(TadoValve, 'preset_mode') == "home") and
-        (state_attr(TadoValve, 'hvac_action') == "heating")  %} {{
-        tollerance_home_heating }}  {% elif (state_attr(TadoValve,
-        'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') !=
-        "heating")  %} {{ tollerance_home_offidle }} {% elif
-        (state_attr(TadoValve, 'preset_mode') == "away") %} {{ tollerance_away
-        }}     {% else %} 1.0 {% endif %}
-      min_time_between_adjust: >-
-        {% if (state_attr(TadoValve, 'preset_mode') == "home") and
-        (state_attr(TadoValve, 'hvac_action') == "heating")  %} {{
-        min_time_between_adjust_home_heating }}  {% elif (state_attr(TadoValve,
-        'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') !=
-        "heating")  %} {{ min_time_between_adjust_home_offidle }} {% elif
-        (state_attr(TadoValve, 'preset_mode') == "away") %} {{
-        min_time_between_adjust_away }}     {% else %} 1.0 {% endif %}
-      SecLastadjust: >-
-        {{ ((as_timestamp(now())) - 
-        (as_timestamp(states('input_datetime.last_offset_change_cucina')))) |
-        round() }}
-      offset: >-
-        {% if ((float(states(ExternalSenors)) - float(states(TadoTemperatureSensor)) + float(state_attr(TadoValve, 'offset_celsius'))) | round(1) > 9.9 ) %} 10.0 
-        {% elif ((float(states(ExternalSenors)) - float(states(TadoTemperatureSensor)) + float(state_attr(TadoValve, 'offset_celsius'))) | round(1) < -9.9 )   %} -9.9 
-        {% else %}  {{ (float(states(ExternalSenors)) - float(states(TadoTemperatureSensor)) + float(state_attr(TadoValve, 'offset_celsius'))) | round(1) }}
-        {% endif %}
-      new_temp: >-
-        {{ state_attr(TadoValve, 'current_temperature') - state_attr(TadoValve,
-        'offset_celsius') + offset|float| round(1) }}
+    TadoValve: !input ValvolaRiferimento
+    TadoTemperatureSensor: !input TadoTemperature
+    ExternalSenors: !input ExternalTemperaure
+    last_offset_change_variables: !input UltimoCambioOffset
+    Counter: !input Contatore
+    tollerance_home_heating: !input TolleranzaHomeHeating
+    tollerance_home_offidle: !input TolleranzaHomeOffIdle
+    tollerance_away: !input TolleranzaAway
+    min_time_between_adjust_home_heating: !input MinTimeHomeHeating
+    min_time_between_adjust_home_offidle: !input MinTimeHomeOffIdle
+    min_time_between_adjust_away: !input MinTimeAway
+
+    # stato/attributi correnti
+    last_offset_change: "{{ states(last_offset_change_variables) }}"
+    last_offset: "{{ float(state_attr(TadoValve, 'offset_celsius')|default(0.0)) }}"
+
+    mode: >-
+      {% if (state_attr(TadoValve, 'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') == "heating") %}
+        HHe
+      {% elif (state_attr(TadoValve, 'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') != "heating") %}
+        HOI
+      {% elif (state_attr(TadoValve, 'preset_mode') == "away") %}
+        A
+      {% else %}
+        ND
+      {% endif %}
+
+    tollerance: >-
+      {% if (state_attr(TadoValve, 'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') == "heating") %}
+        {{ tollerance_home_heating }}
+      {% elif (state_attr(TadoValve, 'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') != "heating") %}
+        {{ tollerance_home_offidle }}
+      {% elif (state_attr(TadoValve, 'preset_mode') == "away") %}
+        {{ tollerance_away }}
+      {% else %}
+        1.0
+      {% endif %}
+
+    min_time_between_adjust: >-
+      {% if (state_attr(TadoValve, 'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') == "heating") %}
+        {{ min_time_between_adjust_home_heating }}
+      {% elif (state_attr(TadoValve, 'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') != "heating") %}
+        {{ min_time_between_adjust_home_offidle }}
+      {% elif (state_attr(TadoValve, 'preset_mode') == "away") %}
+        {{ min_time_between_adjust_away }}
+      {% else %}
+        1.0
+      {% endif %}
+
+    # secondi dall'ultimo cambiamento usando l'entity passato in input (correzione)
+    SecLastadjust: >-
+      {{ ((as_timestamp(now()) - as_timestamp(states(last_offset_change_variables))) | int ) }}
+
+    # === CORRETTO: Tieni conto che il Tado è influenzato dall'offset corrente ===
+    # raw_offset calcolato come: O_curr + (External - T_disp)  (equivalente a External - (T_disp - O_curr))
+    raw_offset: >-
+      {{ ( last_offset + (states(ExternalSenors)|float(0) - states(TadoTemperatureSensor)|float(0)) ) | round(1) }}
+
+    # clamp sui limiti (mantieni i tuoi limiti -9.9/10.0)
+    offset: >-
+      {% set v = raw_offset | float %}
+      {% if v > 10.0 %} 10.0
+      {% elif v < -9.9 %} -9.9
+      {% else %} {{ v | round(1) }}
+      {% endif %}
+
+    new_temp: >-
+      {{ (state_attr(TadoValve, 'current_temperature') | float(0) - state_attr(TadoValve, 'offset_celsius') | float(0) + offset | float(0)) | round(1) }}
+
   - service: logbook.log
     data:
       name: "{{ states[TadoValve].name }}"
