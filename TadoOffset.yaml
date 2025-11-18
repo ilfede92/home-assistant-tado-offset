@@ -1,0 +1,246 @@
+blueprint:
+  name: TadoOffset
+  description: Cambia il valore di offset tramite un sensore esterno
+  domain: automation
+
+  input:
+
+    ValvolaRiferimento:
+      name: Valvola Tado di riferimento
+      selector:
+        entity:
+          domain:
+          - climate
+    TadoTemperature:
+      name: Sensore di temperatura Tado
+      selector:
+        entity:
+          domain:
+          - sensor 
+    ExternalTemperaure:
+      name: Sensore di temperartura Esterno
+      selector:
+        entity:
+          domain:
+          - sensor         
+    UltimoCambioOffset:
+      name: date input che tiene in memoria l'ultimo cambio offset
+      selector:
+        entity:
+          domain:
+          - input_datetime
+    Contatore:
+      name: Contatore che incrementa ad ogni cambio offset.
+      selector:
+        entity:
+          domain:
+          - counter
+    TolleranzaHomeHeating:
+      name: Valore tolleranza temperatura in Home - Heating
+      description: SASA
+      default: 0.2
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 0.1
+          unit_of_measurement: °C
+    TolleranzaHomeOffIdle:
+      name: Valore tolleranza temperatura in Home - Off / Idle
+      description: SASA
+      default: 0.4
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 0.1
+          unit_of_measurement: °C
+    TolleranzaAway:
+      name: Valore tolleranza temperatura in Away
+      description: SASA
+      default: 0.5
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 0.1
+          unit_of_measurement: °C
+    MinTimeHomeHeating:
+      name: Minimo valore minuti in Home - Heating
+      description: SASA
+      default: 300
+      selector:
+        number:
+          min: 0
+          max: 60000
+          unit_of_measurement: secondi
+    MinTimeHomeOffIdle:
+      name: Minimo valore minuti in Home - Off / Idle
+      description: SASA
+      default: 900
+      selector:
+        number:
+          min: 0
+          max: 60000
+          unit_of_measurement: secondi
+    MinTimeAway:
+      name: Minimo valore minuti in Away
+      description: SASA
+      default: 1800
+      selector:
+        number:
+          min: 0
+          max: 60000
+          unit_of_measurement: secondi
+
+trigger:
+  - platform: state
+    entity_id:
+      - !input ValvolaRiferimento
+      - !input TadoTemperature
+      - !input ExternalTemperaure
+condition: []
+action:
+  - variables:
+      TadoValve: !input ValvolaRiferimento
+      TadoTemperatureSensor: !input TadoTemperature
+      ExternalSenors: !input ExternalTemperaure
+      last_offset_change_variables: !input UltimoCambioOffset
+      Counter: !input Contatore
+      tollerance_home_heating: !input TolleranzaHomeHeating
+      tollerance_home_offidle: !input TolleranzaHomeOffIdle
+      tollerance_away: !input TolleranzaAway
+      min_time_between_adjust_home_heating: !input MinTimeHomeHeating
+      min_time_between_adjust_home_offidle: !input MinTimeHomeOffIdle
+      min_time_between_adjust_away: !input MinTimeAway
+      last_offset_change: "{{ states(last_offset_change_variables) }}"
+      last_offset: "{{ float(state_attr(TadoValve, 'offset_celsius')) }}"
+      mode: >-
+        {% if (state_attr(TadoValve, 'preset_mode') == "home") and
+        (state_attr(TadoValve, 'hvac_action') == "heating")  %} HHe {% elif
+        (state_attr(TadoValve, 'preset_mode') == "home") and
+        (state_attr(TadoValve, 'hvac_action') != "heating")  %} HOI {% elif
+        (state_attr(TadoValve, 'preset_mode') == "away") %} A    {% else %} ND
+        {% endif %}  
+      tollerance: >-
+        {% if (state_attr(TadoValve, 'preset_mode') == "home") and
+        (state_attr(TadoValve, 'hvac_action') == "heating")  %} {{
+        tollerance_home_heating }}  {% elif (state_attr(TadoValve,
+        'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') !=
+        "heating")  %} {{ tollerance_home_offidle }} {% elif
+        (state_attr(TadoValve, 'preset_mode') == "away") %} {{ tollerance_away
+        }}     {% else %} 1.0 {% endif %}
+      min_time_between_adjust: >-
+        {% if (state_attr(TadoValve, 'preset_mode') == "home") and
+        (state_attr(TadoValve, 'hvac_action') == "heating")  %} {{
+        min_time_between_adjust_home_heating }}  {% elif (state_attr(TadoValve,
+        'preset_mode') == "home") and (state_attr(TadoValve, 'hvac_action') !=
+        "heating")  %} {{ min_time_between_adjust_home_offidle }} {% elif
+        (state_attr(TadoValve, 'preset_mode') == "away") %} {{
+        min_time_between_adjust_away }}     {% else %} 1.0 {% endif %}
+      SecLastadjust: >-
+        {{ ((as_timestamp(now())) - 
+        (as_timestamp(states('input_datetime.last_offset_change_cucina')))) |
+        round() }}
+      offset: >-
+        {% if ((float(states(ExternalSenors)) - float(states(TadoTemperatureSensor)) + float(state_attr(TadoValve, 'offset_celsius'))) | round(1) > 9.9 ) %} 10.0 
+        {% elif ((float(states(ExternalSenors)) - float(states(TadoTemperatureSensor)) + float(state_attr(TadoValve, 'offset_celsius'))) | round(1) < -9.9 )   %} -9.9 
+        {% else %}  {{ (float(states(ExternalSenors)) - float(states(TadoTemperatureSensor)) + float(state_attr(TadoValve, 'offset_celsius'))) | round(1) }}
+        {% endif %}
+      new_temp: >-
+        {{ state_attr(TadoValve, 'current_temperature') - state_attr(TadoValve,
+        'offset_celsius') + offset|float| round(1) }}
+  - service: logbook.log
+    data:
+      name: "{{ states[TadoValve].name }}"
+      message: >
+        tollerance: {{ tollerance }}; min_time_between_adjust: {{
+        min_time_between_adjust }}; offset: {{offset}}; new_temp: {{ new_temp
+        }}; last_update: {{ last_offset_change }}; ({{ mode }};{{ tollerance
+        }};{{ min_time_between_adjust }};{{ SecLastadjust }};{{ offset }})
+      entity_id: |
+        {{ TadoValve }}
+      domain: climate
+    enabled: false
+  - action: shell_command.tado_dir
+    data: {}
+  - action: shell_command.tado_fil
+    metadata: {}
+    data: {}    
+  - service: shell_command.tado_log
+    data:
+      text: >    
+           {{states[TadoValve].name }};
+           {{mode }};
+           {{state_attr(TadoValve, 'preset_mode') }};
+           {{state_attr(TadoValve, 'hvac_action') }};
+           {{float(states(TadoTemperatureSensor)) | round(1) }};
+           {{float(states(ExternalSenors)) | round(1) }};
+           {{((float(states(TadoTemperatureSensor)) | round(1)) - (float(states(ExternalSenors)) | round(1))) | round(1) }};
+           {{tollerance | round(1) }};
+           {{float(state_attr(TadoValve, 'offset_celsius')) }};
+           {{offset| round(1) }};
+           {{ ((float(states(TadoTemperatureSensor)) | round(1)) - (state_attr(TadoValve, 'offset_celsius') | float | round(1)) + offset | float | round(1)) | round(1) }};
+           {{(float(state_attr(TadoValve, 'temperature'))) }};
+           {{states(last_offset_change_variables) }};
+           {{now() }};
+           {{SecLastadjust }};
+           {{min_time_between_adjust }};
+           {{(is_number(states(ExternalSenors))) }};
+           {{(is_number(states(TadoTemperatureSensor))) }};
+           {{(state_attr(TadoValve, 'offset_celsius')|float| round(1) != offset|float| round(1)) }};
+           {{((states(ExternalSenors)|float| round(1) - states(TadoTemperatureSensor)|float| round(1))|abs > tollerance) }};
+           {{(SecLastadjust > min_time_between_adjust) }};
+           {{(state_attr(TadoValve, 'preset_mode') != "away") }};
+           {{(state_attr(TadoValve, 'hvac_action') != "off") }};
+           {{ (float(states(TadoTemperatureSensor)) | round(1) - (state_attr(TadoValve, 'offset_celsius') | float | round(1)) + offset) < float(state_attr(TadoValve, 'temperature')) }};
+           {{(is_number(states(ExternalSenors))) and (is_number(states(TadoTemperatureSensor))) and (state_attr(TadoValve, 'offset_celsius')|float| round(1) != offset|float| round(1)) and ((states(ExternalSenors)|float| round(1) - states(TadoTemperatureSensor)|float| round(1))|abs > tollerance) and (SecLastadjust > min_time_between_adjust) and (state_attr(TadoValve, 'preset_mode') != "away") and (state_attr(TadoValve, 'hvac_action') != "off") and (float(states(TadoTemperatureSensor)) | round(1) - (state_attr(TadoValve, 'offset_celsius') | float | round(1)) + offset) < float(state_attr(TadoValve, 'temperature')) }};
+
+  - condition: and
+    conditions:
+      - "{{ is_number(states(ExternalSenors)) }}"
+      - "{{ is_number(states(TadoTemperatureSensor)) }}"
+      - "{{ state_attr(TadoValve, 'offset_celsius')|float| round(1) != offset|float| round(1) }}"
+      - >-
+        {{ (states(ExternalSenors)|float| round(1) -
+        states(TadoTemperatureSensor)|float| round(1))|abs > tollerance }}
+      - "{{ SecLastadjust > min_time_between_adjust}}"
+      - "{{ state_attr(TadoValve, 'preset_mode') != 'away' }}"
+      - "{{ state_attr(TadoValve, 'hvac_action') != 'off' }}"
+      - "{{ (float(states(TadoTemperatureSensor)) | round(1) - (state_attr(TadoValve, 'offset_celsius') | float | round(1)) + offset) < float(state_attr(TadoValve, 'temperature')) }}"
+    enabled: true
+
+  - service: tado.set_climate_temperature_offset
+    data:
+      entity_id: "{{ TadoValve }}"
+      offset: "{{ offset }}"
+    enabled: true
+  - wait_template: "{{ is_state_attr(TadoValve, 'offset_celsius', offset) }}"
+    continue_on_timeout: false
+    timeout: "00:05:00"
+  - service: python_script.hass_entities
+    data:
+      action: set_state
+      entity_id: "{{ last_offset_change_variables }}"
+      state: "{{ now() }}"
+  - service: logbook.log
+    data:
+      name: "{{ states[TadoValve].name }}"
+      message: >
+        is currently {{ state_attr(TadoValve, 'hvac_action') }} with temp {{
+        states(TadoTemperatureSensor) }} but room is {{ states( ExternalSenors)
+        }} changing offset from {{ last_offset }} to
+        {{ offset }} - ({{ mode }};{{ tollerance }};{{ min_time_between_adjust
+        }};{{ SecLastadjust }};{{ offset }})
+      entity_id: |
+        {{ TadoValve }}
+      domain: climate
+    enabled: true
+  - service: counter.increment
+    data: {}
+    target:
+      entity_id: "{{ Counter }}"
+mode: queued
+max: 25
+          
+          
