@@ -1,0 +1,4 @@
+shell_command:
+  tado_dir: /bin/bash -c "[ -d /config/log/offset/$(date +%Y-%m) ] || mkdir -p /config/log/offset/$(date +%Y-%m)"
+  tado_fil: /bin/bash -c "[ -f /config/log/offset/$(date +%Y-%m)/day-$(date +%d).log ] || echo 'Data;Ora;Nome;Modalità;Preset_Mode;Hvac_Action;Tado_Temperature;Sensor_Temperature;Differenza_Temperature;Tolleranza;Offset_Impostato;Offset_Nuovo;NewTemp;TargetTemp;Ultima_Variazione;Now;SecLastadjust;min_time_between_adjust;C1_Sensore_isnumber;C2_Tado_isnumber;C3_OffsetImpostato != Offset_Nuovo;C4_Offset>Tolleranza;C5_Tempo;C6_preset!=Away;C7_hvac!=off;C8_NewTemp<target;TutteLeCondizioni;' > /config/log/offset/$(date +%Y-%m)/day-$(date +%d).log"
+  tado_log: '/bin/bash -c "echo \"$(date +%Y-%m-%d); $(date +%H:%M:%S); {{text}}\" >> /config/log/offset/$(date +%Y-%m)/day-$(date +%d).log"'
