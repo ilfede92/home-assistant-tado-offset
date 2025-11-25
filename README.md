@@ -2,192 +2,126 @@
 
 ![Tado Offset Manager](https://img.shields.io/badge/Home%20Assistant-Tado%20Offset-blue)
 
-Blueprint e automazioni per regolare l'offset delle teste termostatiche Tado in base a un sensore di temperatura esterno. Progettato per applicare cambi solo quando hanno effetto reale sul comportamento della valvola, riducendo chiamate inutili e preservando la batteria.
+Blueprint e automazioni per regolare l'offset delle teste termostatiche Tado usando un sensore di temperatura esterno. Progettato per applicare cambi solo quando hanno effetto reale sul comportamento della valvola, riducendo chiamate inutili e preservando batteria.
 
 Indice
 - Panoramica
-- Caratteristiche principali
+- Funzionamento e logica
 - Requisiti
 - Installazione
 - Configurazione (per ogni valvola)
 - Logging CSV e shell_command
-- Esempi (setup passo-passo)
+- Esempi di setup
 - Tuning e parametri consigliati
-- Testing e troubleshooting
-- FAQ
 - Contribuire
 - Licenza
 
 ----------------------------------------
 Panoramica
 ----------------------------------------
-Questo progetto fornisce un blueprint Home Assistant che calcola e applica l'offset alle valvole Tado in modo intelligente:
+Questo blueprint calcola e applica in modo conservativo l'offset di una testina Tado per allineare la temperatura mostrata dalla testina con quella di un sensore ambiente di riferimento.
 
-- Rappresentazione fondamentale:
-  - La valvola mostra una temperatura influenzata dall'offset: T_disp = T_reale + O_curr
-  - Per far coincidere la temperatura mostrata con la temperatura del sensore esterno E si calcola:
-    O_new = O_curr + (E - T_disp)
+Principio:
+- La testina Tado mostra una temperatura influenzata dall'offset: T_disp = T_reale + O_curr
+- Per far coincidere T_disp con il sensore esterno E si calcola:
+  O_new = O_curr + (E - T_disp)
 
-- Il blueprint:
-  - calcola O_new e lo arrotonda a 0.1°C (precisione usata dall'API Tado);
-  - applica clamp ai limiti (-9.9 … 10.0);
-  - chiama il servizio Tado per impostare l'offset solo se:
-    - la differenza tra sensore esterno e Tado supera la tolleranza definita per la modalità,
-    - è passato il tempo minimo dall'ultimo cambio (input_datetime dedicato),
-    - l'offset arrotondato differisce da quello corrente,
-    - l'applicazione ha potenziale impatto sul funzionamento della valvola (evita cambi inutili che consumano batteria).
+O_new → Offset nuovo (valore calcolato da applicare)
+O_curr → Offset corrente (valore attualmente impostato sul device)
+T_disp → Temperatura mostrata dalla testina Tado (display, già comprensiva dell'offset)
+T_reale → Temperatura reale dell'ambiente (valore “vero” che vogliamo ottenere)
+E → Temperatura rilevata dal sensore esterno di riferimento
+
+Il blueprint:
+- arrotonda O_new a 0.1 °C (precisione API Tado),
+- applica clamp tra -9.9 e +10.0 °C,
+- applica l'offset solo se una serie di controlli (vedi sotto) sono soddisfatti.
 
 ----------------------------------------
-Caratteristiche principali
+Funzionamento e logica
 ----------------------------------------
-- Calcolo corretto dell'offset (tiene conto dell'offset corrente).
-- Arrotondamento a 0.1°C per coerenza con la precisione API.
-- Tolleranze separate per modalità: Home (heating / off-idle) e Away.
-- MinTime (in secondi) per limitare la frequenza in funzione della modalità.
-- Fallback conservativo quando la target temperature è null (tipico quando la valvola è "off"): applica cambi solo per differenze più ampie (diff >= 2×tollerance).
-- Attesa fino a 120s per conferma dell'applicazione (wait_template); anche se non confermato, l'input_datetime viene aggiornato (strategia per preservare batteria).
-- Logging CSV su file (comandi shell configurati in configuration.yaml) per facile importazione in Excel.
-- Watcher automation esempio per aggiornare l'input_datetime quando l'offset viene cambiato manualmente.
+Condizioni che devono essere vere per applicare l'offset:
+1. preset_mode della valvola = 'home' (opera solo in modalità home)
+2. Entrambi i sensori (Tado e sensore esterno) sono numerici e disponibili
+3. L'offset calcolato differisce dall'offset corrente (arrotondato)
+4. La differenza |External - Tado_disp| supera la Tolleranza configurata
+5. È trascorso almeno MinTime dall'ultimo cambio (input_datetime)
+6. significant_state_change == True (valutato solo se la valvola ha una temperatura target): significa che l'applicazione dell'offset provocherebbe un cambio nella richiesta di calore (ON↔OFF)
+- Se la temperatura target non è presente (ad es. valvola in off senza target), significant_state_change = False e l'automazione non applica l'offset.
+
+Tutte le condizioni applicate servono per ridurre al minimo le impostazioni di offset per preservare al massimo la batteria e la vita dei dispositivi, considerando che ogni cambio di offset provoca la ricalibrazione della valvola.
 
 ----------------------------------------
 Requisiti
 ----------------------------------------
-- Home Assistant con supporto a Blueprints e accesso ai servizi Tado.
-- Integrazione Tado attiva in HA che espone:
+- Home Assistant con supporto Blueprints.
+- Integrazione Tado che espone:
   - attributo offset_celsius
-  - attributo temperature (se presente; gestiamo il caso null)
+  - (opzionale) attribute temperature (target)
   - servizio tado.set_climate_temperature_offset
-- Per ogni valvola gestita:
-  - entità climate.<nome_valvola>
-  - sensore Tado (sensore che riporta la temperatura della testina)
-  - sensore esterno (sensor.<nome>)
-  - input_datetime per tracciare l'ultimo cambio offset (es. input_datetime.last_offset_change_<room>)
-  - counter opzionale per tracciare i tentativi/applicazioni
+- Per ciascuna valvola:
+  - entità climate.<valvola>
+  - sensore Tado che riporta temperatura della testa
+  - sensore esterno di riferimento (sensor.<nome>)
+  - input_datetime per tracciare l'ultimo cambio offset
+  - counter opzionale per contare i tentativi/applicazioni
 
 ----------------------------------------
 Installazione
 ----------------------------------------
-1. Copia `TadoOffset.yaml` nella cartella `blueprints/automation/ilfede92/` (o importa il blueprint via UI).
-2. Aggiungi le shell_command in `configuration.yaml` (esempio già presente nel repository — vedi sotto la sezione "Logging CSV and shell_command").
-3. Crea per ogni valvola:
-   - un `input_datetime` (es. input_datetime.last_offset_change_soggiorno)
-   - un `counter` (opzionale; es. counter.tado_soggiorno)
-4. Importa il blueprint in Home Assistant e crea una nuova automazione per ogni valvola impostando gli input corretti.
+1. Copia `TadoOffset.yaml` nella cartella `blueprints/automation/<tuo_utente>/` oppure importa il blueprint via UI.
+2. Aggiungi le shell_command nel tuo `configuration.yaml` (vedi sezione sotto).
+3. Per ogni valvola crea:
+   - input_datetime.<nome> (es. input_datetime.last_offset_change_soggiorno)
+   - counter.<nome> (opzionale)
+4. Importa il blueprint in HA e crea un'istanza per ogni valvola, impostando i parametri.
 
 ----------------------------------------
-Configurazione (per ogni valvola)
-----------------------------------------
-Parametri principali:
+Configurazione (parametri principali)
 - ValvolaRiferimento: entità climate della valvola (es. climate.soggiorno)
-- TadoTemperature: sensore che riporta la temperatura della testa Tado
-- ExternalTemperaure: sensore esterno di riferimento
-- UltimoCambioOffset: input_datetime per tracciare l'ultimo cambio
-- Contatore: counter (opzionale) per tracciare applicazioni
-- TolleranzaHomeHeating / TolleranzaHomeOffIdle / TolleranzaAway (°C)
-- MinTimeHomeHeating / MinTimeHomeOffIdle / MinTimeAway (secondi)
-- wait_epsilon: soglia numerica per considerare l'offset applicato (es. 0.05)
+- TadoTemperature: sensore che riporta la temperatura della testina Tado
+- ExternalSensor: sensore esterno di riferimento
+- UltimoCambioOffset: input_datetime che registra l'ultimo set (creato in precedenza)
+- Contatore: counter (opzionale)
+- Tolleranza: soglia (°C) per la differenza tra sensori (default 0.2)
+- MinTime: tempo minimo (secondi) tra cambi (default 300)
+- wait_epsilon: soglia (°C) usata per considerare confermato l'offset sul device (default 0.05)
 
-Valori consigliati (default nel blueprint):
-- TolleranzaHomeHeating: 0.2
-- TolleranzaHomeOffIdle: 0.4
-- TolleranzaAway: 0.5
-- MinTimeHomeHeating: 300 (5 min)
-- MinTimeHomeOffIdle: 900 (15 min)
-- MinTimeAway: 1800 (30 min)
-- wait_epsilon: 0.05
+Valori consigliati (default del blueprint):
+- Tolleranza: 0.2 °C
+- MinTime: 300 s (5 min)
+- wait_epsilon: 0.05 °C
+- wait timeout nel blueprint: 240 s (configurabile nel file se vuoi ridurlo)
 
 ----------------------------------------
 Logging CSV e shell_command
 ----------------------------------------
-Il repository contiene un file `configuration.yaml` di esempio che definisce i seguenti shell_command usati dall'automazione:
-
-```yaml
-shell_command:
-  tado_dir: /bin/bash -c "[ -d /config/log/offset/$(date +%Y-%m) ] || mkdir -p /config/log/offset/$(date +%Y-%m)"
-  tado_fil: /bin/bash -c "[ -f /config/log/offset/$(date +%Y-%m)/day-$(date +%d).log ] || echo 'Data;Ora;Nome;Modalità;Preset_Mode;Hvac_Action;Tado_Temperature;Sensor_Temperature;Differenza_Temperature;Tolleranza;Offset_Impostato;Offset_Nuovo;NewTemp;TargetTemp;Ultima_Variazione;Now;SecLastadjust;min_time_between_adjust;C1_Sensore_isnumber;C2_Tado_isnumber;C3_OffsetImpostato != Offset_Nuovo;C4_Offset>Tolleranza;C5_Tempo;C6_preset!=Away;C7_hvac!=off;C8_NewTemp<target;TutteLeCondizioni;' > /config/log/offset/$(date +%Y-%m)/day-$(date +%d).log"
-  tado_log: '/bin/bash -c "echo \"$(date +%Y-%m-%d); $(date +%H:%M:%S); {{text}}\" >> /config/log/offset/$(date +%Y-%m)/day-$(date +%d).log"'
-```
-
-- L'automazione esegue in sequenza: `tado_dir` (crea la directory mensile), `tado_fil` (crea il file giornaliero con intestazione se mancante) e `tado_log` (appende la riga CSV).
-- Il file generato si trova in `/config/log/offset/YYYY-MM/day-DD.log`.
-- La riga è in formato CSV separato da `;`. Intestazione e colonne corrispondono a quanto definito nel `tado_fil`.
-
-Esempio di intestazione generata automaticamente:
-Data;Ora;Nome;Modalità;Preset_Mode;Hvac_Action;Tado_Temperature;Sensor_Temperature;Differenza_Temperature;Tolleranza;Offset_Impostato;Offset_Nuovo;NewTemp;TargetTemp;Ultima_Variazione;Now;SecLastadjust;min_time_between_adjust;C1_Sensore_isnumber;C2_Tado_isnumber;C3_OffsetImpostato != Offset_Nuovo;C4_Offset>Tolleranza;C5_Tempo;C6_preset!=Away;C7_hvac!=off;C8_NewTemp<target;TutteLeCondizioni;
-
-Nota: Se desideri un file `.csv` esplicito, puoi modificare `tado_fil` per scrivere `day-$(date +%d).csv`.
+L'automazione registra una riga CSV per ogni evento (anche non eseguito, per diagnostica). Il repository contiene un esempio di configurazione `shell_command` da inserire in `configuration.yaml`.
 
 ----------------------------------------
-Esempio rapido di setup (passo-passo)
-----------------------------------------
-1. Creare le entità di supporto (per es. per stanza "soggiorno"):
+Esempio rapido di setup
+1. Crea:
    - input_datetime.last_offset_change_soggiorno
-   - counter.tado_soggiorno
-2. Importare e configurare il blueprint:
+   - counter.tado_soggiorno (opzionale)
+2. Importa il blueprint e imposta gli input:
    - ValvolaRiferimento: climate.soggiorno
    - TadoTemperature: sensor.tado_soggiorno_temperature
-   - ExternalTemperaure: sensor.temperatura_soggiorno
+   - ExternalSensor: sensor.temperatura_soggiorno
    - UltimoCambioOffset: input_datetime.last_offset_change_soggiorno
    - Contatore: counter.tado_soggiorno
-3. (Opzionale ma consigliato) Aggiungere watcher automation che aggiorna l'input_datetime quando l'offset viene cambiato manualmente:
-```yaml
-alias: Aggiorna input_datetime su cambio offset Tado - soggiorno
-trigger:
-  - platform: state
-    entity_id: climate.soggiorno
-    attribute: offset_celsius
-action:
-  - service: input_datetime.set_datetime
-    target:
-      entity_id: input_datetime.last_offset_change_soggiorno
-    data:
-      date_time: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-mode: single
-```
-4. Abilitare logging (opzionale) per il debug:
-   - Imposta il logger `blueprints.tado.offset` a livello `debug` per alcune ore.
 
 ----------------------------------------
 Tuning e parametri consigliati
-----------------------------------------
-- Se vedi troppi set non necessari:
-  - aumenta le Tolleranza* o
-  - aumenta MinTime* o
-  - aumenta la persistence dei trigger (nel blueprint sono impostati `for: 10s` sui trigger)
-- Se i cambi non sono applicati entro 120s:
-  - verifica stato integrazione Tado e connettività
-  - aumenta il timeout `wait_template` se necessario
-- Se vuoi variazioni più graduali, è possibile aggiungere smoothing (non implementato di default).
+- Se vedi troppi set: aumenta Tolleranza o MinTime.
+- Se vedi troppi blocchi per significant_state_change (target assente): verifica le modalità/preset della valvola; se vuoi agire anche senza target, richiedi modifica della logica (non consigliato di default).
+- Se l'offset non viene confermato: verifica integrazione Tado e connessione delle testine; puoi aumentare il timeout del wait_template.
 
-----------------------------------------
-Testing e troubleshooting
-----------------------------------------
-- Test manuale:
-  - Usa Developer Tools → States per simulare cambi nel sensore esterno e osservare la riga CSV.
-  - Verifica che il counter incrementi solo quando viene effettivamente invocato il set.
-- Problemi comuni:
-  - errori template su `unavailable` o `None`: i template nel blueprint sono stati resi robusti usando `| float(0)`; assicurati comunque che le entità passate esistano.
-  - trigger “for” non rispettato nel tuo environment: sostituisci il for con un valore fisso (es. "00:00:10") nell'istanza dell'automazione se necessario.
-  - offset non aggiornato: verifica che l'attributo `offset_celsius` sia esposto dalla tua integrazione Tado.
-
-----------------------------------------
-FAQ rapida
-----------------------------------------
-Q: Perché l'automazione aggiorna l'input_datetime anche se il device non conferma entro 120s?  
-A: È una scelta per evitare retry aggressivi che consumerebbero la batteria delle testine. Il fallimento resta loggato e puoi analizzarlo via CSV.
-
-Q: Posso usare una sola watcher per tutte le valvole?  
-A: Sì, però è più semplice e robusto avere un input_datetime e watcher per ciascuna valvola; è possibile però creare una watcher multi-valvola con un template nel trigger.
 
 ----------------------------------------
 Contribuire
-----------------------------------------
-Se vuoi contribuire:
-- apri una issue con il caso d'uso o bug;
-- crea una PR con la modifica; includi esempi di entity_id concreti per i test.
+- Apri una issue con bug o richiesta.
+- Per PR: aggiornare README e includere esempi concreti di entity_id.
 
 ----------------------------------------
 Licenza
-----------------------------------------
-MIT — sentiti libero di usare/adattare con attribuzione.
-
+MIT
