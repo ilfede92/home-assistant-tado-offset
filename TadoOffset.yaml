@@ -1,11 +1,10 @@
+# Blueprint: TadoOffset
 # Scopo:
-#   Automazione per regolare l'offset di una testina Tado in base a un sensore di temperatura esterno.
-#   Progettata per ridurre cambi non necessari e preservare batteria limitando le modifiche solo quando necessario.
-# Note rapide:
+#   Automazione per regolare l'offset di una testina Tado in base a un sensore esterno.
+# Note:
 #   - Precisione offset: 0.1 °C (arrotondamento)
 #   - Attende fino a 120s la conferma dell'attributo offset_celsius dopo il set
 #   - Registra una riga CSV su file per facilità di analisi (import in Excel)
-#   - Richiede la presenza di input_datetime e counter per ogni valvola gestita
 blueprint:
   name: TadoOffset
   description: >
@@ -23,7 +22,7 @@ blueprint:
       selector:
         entity:
           domain: sensor
-    ExternalTemperaure:
+    ExternalSensor:
       name: Sensore di temperatura esterno
       selector:
         entity:
@@ -38,8 +37,8 @@ blueprint:
       selector:
         entity:
           domain: counter
-    TolleranzaHomeHeating:
-      name: Tolleranza Home - Heating (°C)
+    Tolleranza:
+      name: Tolleranza tra temperatura rilevata dalla valvola e il sensore esterno (°C)
       default: 0.2
       selector:
         number:
@@ -47,43 +46,9 @@ blueprint:
           max: 2
           step: 0.1
           unit_of_measurement: "°C"
-    TolleranzaHomeOffIdle:
-      name: Tolleranza Home - Off/Idle (°C)
-      default: 0.4
-      selector:
-        number:
-          min: 0
-          max: 2
-          step: 0.1
-          unit_of_measurement: "°C"
-    TolleranzaAway:
-      name: Tolleranza Away (°C)
-      default: 0.5
-      selector:
-        number:
-          min: 0
-          max: 2
-          step: 0.1
-          unit_of_measurement: "°C"
-    MinTimeHomeHeating:
-      name: MinTime Home - Heating (secondi)
+    MinTime:
+      name: Tempo Minimo tra un cambio offset ed un'altro
       default: 300
-      selector:
-        number:
-          min: 0
-          max: 60000
-          unit_of_measurement: secondi
-    MinTimeHomeOffIdle:
-      name: MinTime Home - Off/Idle (secondi)
-      default: 900
-      selector:
-        number:
-          min: 0
-          max: 60000
-          unit_of_measurement: secondi
-    MinTimeAway:
-      name: MinTime Away (secondi)
-      default: 1800
       selector:
         number:
           min: 0
@@ -108,7 +73,7 @@ trigger:
     entity_id: !input TadoTemperature
     for: "00:00:10"
   - platform: state
-    entity_id: !input ExternalTemperaure
+    entity_id: !input ExternalSensor
     for: "00:00:10"
 
 condition: []
@@ -118,17 +83,13 @@ action:
       # entità in ingresso
       TadoValve: !input ValvolaRiferimento
       TadoTemperatureSensor: !input TadoTemperature
-      ExternalSenors: !input ExternalTemperaure
+      ExternalSenors: !input ExternalSensor
       last_offset_change_variables: !input UltimoCambioOffset
       Counter: !input Contatore
 
       # parametri
-      tollerance_home_heating: !input TolleranzaHomeHeating
-      tollerance_home_offidle: !input TolleranzaHomeOffIdle
-      tollerance_away: !input TolleranzaAway
-      min_time_between_adjust_home_heating: !input MinTimeHomeHeating
-      min_time_between_adjust_home_offidle: !input MinTimeHomeOffIdle
-      min_time_between_adjust_away: !input MinTimeAway
+      tollerance: !input Tolleranza
+      min_time_between_adjust: !input MinTime
       wait_eps: !input wait_epsilon
 
       # stato corrente (conversioni sicure)
@@ -153,30 +114,6 @@ action:
       current_hvac_action: "{{ state_attr(TadoValve, 'hvac_action') | default('') | string }}"
       current_preset_mode: "{{ state_attr(TadoValve, 'preset_mode') | default('') | string }}"
 
-      # Calcolo della modalità
-      mode: >-
-        {% if (current_preset_mode == 'home') and (current_hvac_action == 'heating') %}
-          HHe
-        {% elif (current_preset_mode == 'home') and (current_hvac_action != 'heating') %}
-          HOI
-        {% elif (current_preset_mode == 'away') %}
-          A
-        {% else %}
-          ND
-        {% endif %}
-
-      # tolleranza e min_time in base alla modalità
-      tollerance: >-
-        {% if mode == 'HHe' %} {{ tollerance_home_heating }}
-        {% elif mode == 'HOI' %} {{ tollerance_home_offidle }}
-        {% elif mode == 'A' %} {{ tollerance_away }}
-        {% else %} 1.0 {% endif %}
-
-      min_time_between_adjust: >-
-        {% if mode == 'HHe' %} {{ min_time_between_adjust_home_heating }}
-        {% elif mode == 'HOI' %} {{ min_time_between_adjust_home_offidle }}
-        {% elif mode == 'A' %} {{ min_time_between_adjust_away }}
-        {% else %} 1.0 {% endif %}
 
       # secondi dall'ultimo cambiamento
       SecLastadjust: >-
@@ -197,66 +134,86 @@ action:
       new_displayed_temp: >-
         {{ (tado_disp_raw - last_offset_raw + offset_clamped | float) | round(1) }}
 
-      # significant_state_change:
-      # - se temperatura target presente: verifica impatto rispetto al target (passaggio da ON->OFF e viceversa)
-      # - se temperatura target assente: fallback conservativo (diff >= 2 * tollerance)
+      # significant_state_change: VALUTATO SOLO SE target è presente
+      # -> True quando curr_req != new_req (cambio ON<->OFF)
       significant_state_change: >-
         {% if target_present %}
           {% set curr_req = (tado_disp_raw < (target_temperature | float(0))) %}
           {% set new_req = ((tado_disp_raw - last_offset_raw + offset_clamped | float) < (target_temperature | float(0))) %}
           {{ curr_req != new_req }}
         {% else %}
-          {{ ((external_val_raw - tado_disp_raw) | abs) >= ((tollerance | float) * 2) }}
+          False
         {% endif %}
 
       offsets_differ: >-
         {{ ( (last_offset | float) != (offset_clamped | float) ) }}
 
-  - action: shell_command.tado_dir
-    data: {}
-  - action: shell_command.tado_fil
-    metadata: {}
-    data: {}    
+      # variabili booleane per log e condizione
+      c1_sensor_is_number: "{{ is_number(states(ExternalSenors)) }}"
+      c2_tado_is_number: "{{ is_number(states(TadoTemperatureSensor)) }}"
+      c3_offset_diff: "{{ offsets_differ }}"
+      c4_diff_gt_tolerance: >-
+        {{ (((external_val_raw - tado_disp_raw) | abs) > (tollerance | float(0))) }}
+      c5_seclast_gt_min: "{{ SecLastadjust > min_time_between_adjust }}"
+      c6_preset_is_home: "{{ current_preset_mode == 'home' }}"
+      c7_significant_state_change: "{{ significant_state_change }}"
+
+      # all_conditions = espressione che deve essere vera per ESEGUIRE il set
+      # Requisiti:
+      #  - preset_mode == 'home'
+      #  - sensori numerici
+      #  - offset differisce
+      #  - tempo dall'ultimo cambio > min_time
+      #  - significant_state_change == True (cambio ON<->OFF)
+      all_conditions: >-
+        {{ c1_sensor_is_number and c2_tado_is_number and c3_offset_diff and c4_diff_gt_tolerance and c5_seclast_gt_min and c6_preset_is_home and c7_significant_state_change }}
+      
+      
+      # --- costruzione riga CSV (semplificata, ordinata e completa con c6/c7) ---
+      csv_log: >-
+        {{ [
+          (states[TadoValve].name | replace(';','') | default('')),
+          (current_preset_mode | default('')),
+          (current_hvac_action | default('')),
+          (tado_disp_raw | float(0) | round(1)),
+          (external_val_raw | float(0) | round(1)),
+          ((tado_disp_raw | float(0) | round(1) - external_val_raw | float(0) | round(1)) | round(1)),
+          (tollerance | float(0) | round(1)),
+          (last_offset_raw | float(0)),
+          (offset | float(0) | round(1)),
+          (new_displayed_temp | float(0) | round(1)),
+          (state_attr(TadoValve, 'temperature') | default('')),
+          (states(last_offset_change_variables) | default('')),
+          (now().strftime('%Y-%m-%d %H:%M:%S')),
+          (SecLastadjust | default(0)),
+          (min_time_between_adjust | default(0)),
+          (c1_sensor_is_number),
+          (c2_tado_is_number),
+          (c3_offset_diff),
+          (c4_diff_gt_tolerance),
+          (c5_seclast_gt_min),
+          (c6_preset_is_home),
+          (c7_significant_state_change),
+          (all_conditions)
+        ] | map('string') | join(';') }}
+
+  # LOG su file (CSV) - crea directory, crea file giornaliero con header (se necessario) e appende la riga
+  - service: shell_command.tado_dir
+  - service: shell_command.tado_fil
   - service: shell_command.tado_log
     data:
-      text: >    
-           {{ states[TadoValve].name }};
-           {{ mode }};
-           {{ state_attr(TadoValve, 'preset_mode') }};
-           {{ state_attr(TadoValve, 'hvac_action') }};
-           {{ (states(TadoTemperatureSensor) | float(0)) | round(1) }};
-           {{ (states(ExternalSenors) | float(0)) | round(1) }};
-           {{ (((states(TadoTemperatureSensor) | float(0)) | round(1)) - ((states(ExternalSenors) | float(0)) | round(1))) | round(1) }};
-           {{ (tollerance | float(0)) | round(1) }};
-           {{ (state_attr(TadoValve, 'offset_celsius') | float(0)) }};
-           {{ (offset | float(0)) | round(1) }};
-           {{ (((states(TadoTemperatureSensor) | float(0)) | round(1)) - (state_attr(TadoValve, 'offset_celsius') | float(0) | round(1)) + (offset | float(0))) | round(1) }};
-           {{ (state_attr(TadoValve, 'temperature') | default('') ) }};
-           {{ states(last_offset_change_variables) }};
-           {{ now() }};
-           {{ SecLastadjust }};
-           {{ min_time_between_adjust }};
-           {{ (is_number(states(ExternalSenors))) }};
-           {{ (is_number(states(TadoTemperatureSensor))) }};
-           {{ ((state_attr(TadoValve, 'offset_celsius') | float(0) | round(1)) != (offset | float(0) | round(1))) }};
-           {{ ((((states(ExternalSenors) | float(0) | round(1)) - (states(TadoTemperatureSensor) | float(0) | round(1))) | abs) > (tollerance | float(0))) }};
-           {{ (SecLastadjust > min_time_between_adjust) }};
-           {{ (state_attr(TadoValve, 'preset_mode') != "away") }};
-           {{ (state_attr(TadoValve, 'hvac_action') != "off") }};
-           {{ ((states(TadoTemperatureSensor) | float(0) | round(1)) - (state_attr(TadoValve, 'offset_celsius') | float(0) | round(1)) + (offset | float(0))) < (state_attr(TadoValve, 'temperature') | float(0)) }};
-           {{ (is_number(states(ExternalSenors))) and (is_number(states(TadoTemperatureSensor))) and ((state_attr(TadoValve, 'offset_celsius') | float(0) | round(1)) != (offset | float(0) | round(1))) and ((((states(ExternalSenors) | float(0) | round(1)) - (states(TadoTemperatureSensor) | float(0) | round(1))) | abs) > (tollerance | float(0))) and (SecLastadjust > min_time_between_adjust) and (state_attr(TadoValve, 'preset_mode') != "away") and (state_attr(TadoValve, 'hvac_action') != "off") and (((states(TadoTemperatureSensor) | float(0) | round(1)) - (state_attr(TadoValve, 'offset_celsius') | float(0) | round(1)) + (offset | float(0))) < (state_attr(TadoValve, 'temperature') | float(0)) ) }};
+      text: "{{ csv_log }}"
 
   # CONDIZIONI PRIMA DI ESEGUIRE LA CHIAMATA AL SERVIZIO TADO:
   - condition: and
     conditions:
-      - "{{ is_number(states(ExternalSenors)) }}"
-      - "{{ is_number(states(TadoTemperatureSensor)) }}"
-      - "{{ state_attr(TadoValve, 'preset_mode') != 'away' }}"
-      - >-
-        {{ ((external_val_raw - tado_disp_raw) | abs) > (tollerance | float) }}
-      - "{{ SecLastadjust > min_time_between_adjust }}"
-      - "{{ offsets_differ }}"
-      - "{{ significant_state_change }}"
+      - "{{ c1_sensor_is_number }}"
+      - "{{ c2_tado_is_number }}"
+      - "{{ c3_offset_diff }}"
+      - "{{ c4_diff_gt_tolerance }}"
+      - "{{ c5_seclast_gt_min }}"
+      - "{{ c6_preset_is_home }}"
+      - "{{ c7_significant_state_change }}"
 
   # APPLICA L'OFFSET (se condizione passata)
   - service: tado.set_climate_temperature_offset
@@ -265,28 +222,28 @@ action:
       offset: "{{ offset_clamped }}"
     enabled: true
 
-  # WAIT fino a 120s per conferma offset (tolleranza small)
+  # WAIT fino a 240s per conferma offset (tolleranza small)
   - wait_template: >-
       {{ ((state_attr(TadoValve, 'offset_celsius') | float(0) - offset_clamped | float(0)) | abs) < (wait_eps | float(0)) }}
-    timeout: "00:02:00"
+    timeout: "00:04:00"
     continue_on_timeout: true
 
-  # aggiorniamo l'input_datetime ultimo cambio
+  # aggiorniamo sempre l'input_datetime ultimo cambio (corretto: chiave 'datetime')
   - service: input_datetime.set_datetime
     target:
       entity_id: "{{ last_offset_change_variables }}"
     data:
-      date_time: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
-  # log risultato (logbook CSV-friendly)
+  # log risultato (logbook CSV-friendly) - testo aggiornato in italiano
   - service: logbook.log
     data:
       name: "{{ states[TadoValve].name }}"
-      message: >
-        is currently {{ state_attr(TadoValve, 'hvac_action') }} with temp {{ states(TadoTemperatureSensor) }} but room is {{ states( ExternalSenors) }}
-        changing offset from {{ last_offset }} to {{ offset }} - ({{ mode }};{{ tollerance }};{{ min_time_between_adjust }};{{ SecLastadjust }};{{ offset }})
-      entity_id: |
-        {{ TadoValve }}
+      message: >-
+        Valvola {{ states[TadoValve].name }} è in modalità {{ state_attr(TadoValve, 'hvac_action') }}
+        con temperatura {{ states(TadoTemperatureSensor) }}°C ({{ (tado_disp_raw - last_offset_raw) | round(1) }}°C) ma il sensore esterno rileva {{ states(ExternalSenors) }}°C.
+        Cambio l'offset da {{ last_offset }}°C a {{ offset_clamped }}°C.
+      entity_id: "{{ TadoValve }}"
       domain: climate
     enabled: true
 
